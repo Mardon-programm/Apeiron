@@ -1,0 +1,17 @@
+[package]
+name = "apeiron-parser"
+description = "Pratt + recursive descent parser for the Apeiron language"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+apeiron-core.workspace = true
+apeiron-lexer.workspace = true
+apeiron-ast.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

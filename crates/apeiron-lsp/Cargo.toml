@@ -1,0 +1,24 @@
+[package]
+name = "apeiron-lsp"
+description = "Language Server Protocol implementation for Apeiron"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "apeiron-lsp"
+path = "src/main.rs"
+
+[dependencies]
+apeiron-core.workspace = true
+apeiron-ast.workspace = true
+apeiron-cli.workspace = true
+apeiron-fmt.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "apeiron-ir"
+description = "SSA intermediate representation, lowering, verification, and passes for Apeiron"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+apeiron-core.workspace = true
+apeiron-ast.workspace = true
+
+[dev-dependencies]
+apeiron-parser.workspace = true
+
+[lints]
+workspace = true

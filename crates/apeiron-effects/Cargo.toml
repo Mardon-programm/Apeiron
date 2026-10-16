@@ -1,0 +1,19 @@
+[package]
+name = "apeiron-effects"
+description = "Interprocedural effect and capability analysis for Apeiron programs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+apeiron-ir.workspace = true
+
+[dev-dependencies]
+apeiron-core.workspace = true
+apeiron-ast.workspace = true
+apeiron-parser.workspace = true
+
+[lints]
+workspace = true

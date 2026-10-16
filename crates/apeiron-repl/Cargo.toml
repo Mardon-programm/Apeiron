@@ -1,0 +1,20 @@
+[package]
+name = "apeiron-repl"
+description = "Interactive read-eval-print loop for Apeiron source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+apeiron-core.workspace = true
+apeiron-parser.workspace = true
+apeiron-analyzer.workspace = true
+apeiron-ir.workspace = true
+apeiron-effects.workspace = true
+apeiron-runtime.workspace = true
+apeiron-stdlib.workspace = true
+
+[lints]
+workspace = true

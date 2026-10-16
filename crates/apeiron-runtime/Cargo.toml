@@ -1,0 +1,20 @@
+[package]
+name = "apeiron-runtime"
+description = "Cognitive runtime: evaluates Apeiron IR and maintains beliefs, memory, causal graphs, and societies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+apeiron-core.workspace = true
+apeiron-ast.workspace = true
+apeiron-ir.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+apeiron-parser.workspace = true
+
+[lints]
+workspace = true

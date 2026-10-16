@@ -1,0 +1,19 @@
+// A small cognitive agent exercising most surface syntax.
+memory episodic ShortTerm { dimension: 16, capacity: 128 }
+
+belief PlanReady {
+    proposition: "plan is ready",
+    confidence: 0.6,
+    because: "evidence"
+}
+
+tensor W : f32[4, 16] = zeros(4, 16)
+tensor x : f32[16] = ones(16, 1)
+
+cause Similarity -> Threshold {
+    when dot(W @ x, x) > 0.5 {
+        observe Similarity = cosine_similarity(W, x)
+    }
+}
+
+let score = softmax([1.0, 2.0, 3.0])

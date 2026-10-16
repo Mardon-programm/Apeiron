@@ -1,0 +1,21 @@
+[package]
+name = "apeiron-stdlib"
+description = "Native standard library: tensor algebra and cognitive primitives for Apeiron programs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+apeiron-ast.workspace = true
+apeiron-ir.workspace = true
+apeiron-runtime.workspace = true
+
+[dev-dependencies]
+apeiron-core.workspace = true
+apeiron-parser.workspace = true
+apeiron-analyzer.workspace = true
+
+[lints]
+workspace = true
