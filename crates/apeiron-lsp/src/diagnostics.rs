@@ -17,6 +17,7 @@ pub fn diagnostics(source: &str, uri: &str) -> Vec<Value> {
             strict: false,
             run: false,
         },
+        &[],
     );
     let file = outcome.map.iter().next();
     outcome

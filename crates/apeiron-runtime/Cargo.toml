@@ -12,6 +12,15 @@ apeiron-core.workspace = true
 apeiron-ast.workspace = true
 apeiron-ir.workspace = true
 thiserror.workspace = true
+faer = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
+
+[features]
+default = []
+# Use the `faer` linear-algebra backend for dense matrix multiplication.
+faer = ["dep:faer"]
+# Load native externs declared in `Apeiron.toml` via dynamic linking.
+ffi = ["dep:libloading"]
 
 [dev-dependencies]
 apeiron-parser.workspace = true

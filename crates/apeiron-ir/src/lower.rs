@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use apeiron_ast::{
-    ArchOp, BeliefStmt, BinaryOp, Expr, Field, FnDecl, Ident, Item, Literal, Program,
+    ArchOp, Arm, BeliefStmt, BinaryOp, Expr, Field, FnDecl, Ident, Item, Literal, Pattern, Program,
     SocietyMember, TypeDim, TypeExpr, UnaryOp,
 };
 use apeiron_core::span::Span;
@@ -20,7 +20,7 @@ use crate::instr::{
     ArchInstr, BeliefInstr, CausalInstr, ConstValue, InstrKind, MemoryInstr, SocietyInstr,
     TensorLit,
 };
-use crate::types::{Dim, DomainKind, ElemType, IrType, TensorTy};
+use crate::types::{Dim, DomainKind, ElemType, EnumTy, IrType, TensorTy};
 use crate::value::{BlockId, FunctionId, ValueId};
 
 /// Error produced when a construct cannot be lowered.
@@ -59,6 +59,24 @@ struct LoopContext {
     continue_block: BlockId,
     exit_block: BlockId,
     carried: Vec<String>,
+}
+
+/// A pattern test deferred to a test block.
+enum MatchTest {
+    /// `value == literal`.
+    Literal {
+        /// Value produced by lowering the scrutinee (or an extracted element).
+        value: ValueId,
+        /// Literal the value must equal.
+        literal: Literal,
+    },
+    /// `value` is the named enum variant.
+    Variant {
+        /// Value produced by lowering the scrutinee.
+        value: ValueId,
+        /// Variant name to test against.
+        variant: String,
+    },
 }
 
 struct Lowerer {
@@ -302,16 +320,18 @@ impl Lowerer {
                 self.env.insert(decl.name.name.clone(), value);
                 None
             }
-            Item::Return { value, .. } => {
-                match value {
-                    Some(value) => {
-                        let lowered = self.lower_expr(builder, value);
-                        builder.terminate(Terminator::Ret(Some(lowered)));
-                    }
-                    None => builder.terminate(Terminator::Ret(None)),
+            Item::Return { value, .. } => match value {
+                Some(value) => {
+                    let lowered = self.lower_expr(builder, value);
+                    builder.terminate(Terminator::Ret(Some(lowered)));
+                    Some(lowered)
                 }
-                None
-            }
+                None => {
+                    let unit = builder.emit_const(ConstValue::Unit, IrType::Unit);
+                    builder.terminate(Terminator::Ret(None));
+                    Some(unit)
+                }
+            },
             Item::While {
                 condition, body, ..
             } => {
@@ -966,9 +986,18 @@ impl Lowerer {
                 let mut last = None;
                 for item in items {
                     last = self.lower_item(builder, item);
+                    if builder.is_terminated() {
+                        break;
+                    }
                 }
-                last.unwrap_or_else(|| builder.emit_const(ConstValue::Unit, IrType::Unit))
+                match last {
+                    Some(value) => value,
+                    None if builder.is_terminated() => placeholder_value(builder),
+                    None => builder.emit_const(ConstValue::Unit, IrType::Unit),
+                }
             }
+            Expr::Match { expr, arms, span } => self.lower_match(builder, expr, arms, *span),
+            Expr::Try { operand, span } => self.lower_try(builder, operand, *span),
         }
     }
 
@@ -984,6 +1013,17 @@ impl Lowerer {
     fn lower_name(&mut self, builder: &mut FunctionBuilder, ident: &Ident) -> ValueId {
         if let Some(value) = self.env.get(&ident.name) {
             return *value;
+        }
+        if ident.name == "None" {
+            return builder.emit(
+                InstrKind::MakeEnum {
+                    type_name: "Option".to_string(),
+                    variant: "None".to_string(),
+                    payload: Vec::new(),
+                },
+                IrType::Enum(EnumTy::new("Option", vec![IrType::Unknown])),
+                Some(ident.span),
+            );
         }
         let ty = self
             .globals
@@ -1086,6 +1126,26 @@ impl Lowerer {
             .iter()
             .map(|arg| self.lower_expr(builder, arg))
             .collect();
+        if matches!(name.as_str(), "Some" | "Ok" | "Err") {
+            let payload_ty = lowered
+                .first()
+                .map(|value| builder.value_type(*value).clone())
+                .unwrap_or(IrType::F32);
+            let (type_name, payload) = match name.as_str() {
+                "Some" => ("Option", vec![payload_ty]),
+                "Ok" => ("Result", vec![payload_ty, IrType::Unknown]),
+                _ => ("Result", vec![IrType::Unknown, payload_ty]),
+            };
+            return builder.emit(
+                InstrKind::MakeEnum {
+                    type_name: type_name.to_string(),
+                    variant: name,
+                    payload: lowered,
+                },
+                IrType::Enum(EnumTy::new(type_name, payload)),
+                Some(span),
+            );
+        }
         let ty = self
             .signatures
             .get(&name)
@@ -1187,6 +1247,273 @@ impl Lowerer {
         }
     }
 
+    // ── match ───────────────────────────────────────────────────────
+
+    /// Lowers `operand?`: returns early on the failure variant, otherwise
+    /// unwraps the success payload.
+    fn lower_try(&mut self, builder: &mut FunctionBuilder, operand: &Expr, span: Span) -> ValueId {
+        let value = self.lower_expr(builder, operand);
+        let enum_ty = match builder.value_type(value) {
+            IrType::Enum(enum_ty) => enum_ty.clone(),
+            _ => EnumTy::new("Option", Vec::new()),
+        };
+        let bad_variant = if enum_ty.name == "Result" {
+            "Err"
+        } else {
+            "None"
+        };
+        let is_bad = builder.emit(
+            InstrKind::EnumIs {
+                value,
+                variant: bad_variant.to_string(),
+            },
+            IrType::Bool,
+            Some(span),
+        );
+        let propagate = builder.create_block("try.propagate");
+        let ok_block = builder.create_block("try.ok");
+        builder.terminate(Terminator::Branch {
+            condition: is_bad,
+            then_block: propagate,
+            then_args: Vec::new(),
+            else_block: ok_block,
+            else_args: Vec::new(),
+        });
+        builder.switch_to(propagate);
+        builder.terminate(Terminator::Ret(Some(value)));
+        builder.switch_to(ok_block);
+        let payload_ty = enum_ty.payload_at(0).cloned().unwrap_or(IrType::Unknown);
+        builder.emit(
+            InstrKind::EnumPayload { value, index: 0 },
+            payload_ty,
+            Some(span),
+        )
+    }
+
+    /// Lowers a `match` expression into a chain of test blocks feeding the
+    /// arm bodies; arm results merge through a block parameter.
+    fn lower_match(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        scrutinee: &Expr,
+        arms: &[Arm],
+        _span: Span,
+    ) -> ValueId {
+        let value = self.lower_expr(builder, scrutinee);
+        let outer_env = self.env.clone();
+
+        let fail_block = builder.create_block("match.fail");
+        let arm_blocks: Vec<BlockId> = (0..arms.len())
+            .map(|index| builder.create_block(format!("match.arm.{index}")))
+            .collect();
+        let entry_blocks: Vec<BlockId> = (0..arms.len())
+            .map(|index| builder.create_block(format!("match.test.{index}")))
+            .collect();
+
+        let first = entry_blocks.first().copied().unwrap_or(fail_block);
+        builder.terminate(Terminator::Jump {
+            target: first,
+            args: Vec::new(),
+        });
+
+        // Emit the pattern tests for every arm, remembering the bindings
+        // each pattern introduces so the arm bodies can see them.
+        let mut arm_bindings: Vec<Vec<(String, ValueId)>> = Vec::with_capacity(arms.len());
+        for (index, arm) in arms.iter().enumerate() {
+            builder.switch_to(entry_blocks[index]);
+            self.env = outer_env.clone();
+
+            let mut bindings = Vec::new();
+            let mut tests = Vec::new();
+            self.lower_pattern_tests(
+                builder,
+                &arm.pat,
+                value,
+                &mut bindings,
+                &mut tests,
+                arm.span,
+            );
+            for (name, bound) in &bindings {
+                self.env.insert(name.clone(), *bound);
+            }
+            arm_bindings.push(bindings);
+
+            let fail_target = entry_blocks.get(index + 1).copied().unwrap_or(fail_block);
+            let total = tests.len() + usize::from(arm.guard.is_some());
+            let mut step = 0;
+            for test in &tests {
+                step += 1;
+                let cond = self.lower_test(builder, test, arm.span);
+                let last = step == total;
+                let then_block = if last {
+                    arm_blocks[index]
+                } else {
+                    builder.create_block(format!("match.test.{index}.{step}"))
+                };
+                builder.terminate(Terminator::Branch {
+                    condition: cond,
+                    then_block,
+                    then_args: Vec::new(),
+                    else_block: fail_target,
+                    else_args: Vec::new(),
+                });
+                if !last {
+                    builder.switch_to(then_block);
+                }
+            }
+            if let Some(guard) = &arm.guard {
+                let cond = self.lower_expr(builder, guard);
+                builder.terminate(Terminator::Branch {
+                    condition: cond,
+                    then_block: arm_blocks[index],
+                    then_args: Vec::new(),
+                    else_block: fail_target,
+                    else_args: Vec::new(),
+                });
+            } else if total == 0 {
+                builder.terminate(Terminator::Jump {
+                    target: arm_blocks[index],
+                    args: Vec::new(),
+                });
+            }
+        }
+
+        self.env = outer_env.clone();
+        builder.switch_to(fail_block);
+        builder.terminate(Terminator::Unreachable);
+
+        // Lower each arm body and remember the block and value it ends in.
+        let mut arm_values: Vec<Option<(BlockId, ValueId)>> = Vec::with_capacity(arms.len());
+        let mut common: Option<IrType> = None;
+        for (index, arm) in arms.iter().enumerate() {
+            builder.switch_to(arm_blocks[index]);
+            self.env = outer_env.clone();
+            for (name, bound) in &arm_bindings[index] {
+                self.env.insert(name.clone(), *bound);
+            }
+            let body = self.lower_expr(builder, &arm.body);
+            if builder.is_terminated() {
+                arm_values.push(None);
+            } else {
+                let block = builder.current_block();
+                let ty = builder.value_type(body).clone();
+                common = Some(match common {
+                    Some(previous) => common_type(&previous, &ty),
+                    None => ty,
+                });
+                arm_values.push(Some((block, body)));
+            }
+        }
+
+        match common {
+            Some(common) => {
+                let merge = builder.create_block_with_params("match.merge", &[common]);
+                let param = builder.block_params(merge)[0];
+                for entry in arm_values.iter().flatten() {
+                    let (block, value) = *entry;
+                    builder.switch_to(block);
+                    builder.terminate(Terminator::Jump {
+                        target: merge,
+                        args: vec![value],
+                    });
+                }
+                builder.switch_to(merge);
+                param
+            }
+            None => {
+                let merge = builder.create_block("match.merge");
+                builder.switch_to(merge);
+                builder.emit_const(ConstValue::Unit, IrType::Unit)
+            }
+        }
+    }
+
+    /// Emits the extraction and equality tests for one pattern against the
+    /// already-lowered `value`, recording any names the pattern binds.
+    fn lower_pattern_tests(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        pat: &Pattern,
+        value: ValueId,
+        bindings: &mut Vec<(String, ValueId)>,
+        tests: &mut Vec<MatchTest>,
+        span: Span,
+    ) {
+        match pat {
+            Pattern::Wildcard => {}
+            Pattern::Bind(ident) => bindings.push((ident.name.clone(), value)),
+            Pattern::Literal(literal) => tests.push(MatchTest::Literal {
+                value,
+                literal: literal.clone(),
+            }),
+            Pattern::Variant { name, inner } => {
+                tests.push(MatchTest::Variant {
+                    value,
+                    variant: name.name.clone(),
+                });
+                if let Some(inner) = inner {
+                    let payload_ty = match builder.value_type(value) {
+                        IrType::Enum(enum_ty) => {
+                            enum_ty.payload_at(0).cloned().unwrap_or(IrType::Unknown)
+                        }
+                        _ => IrType::Unknown,
+                    };
+                    let payload = builder.emit(
+                        InstrKind::EnumPayload { value, index: 0 },
+                        payload_ty,
+                        Some(span),
+                    );
+                    self.lower_pattern_tests(builder, inner, payload, bindings, tests, span);
+                }
+            }
+            Pattern::Tuple(elements) => {
+                let element_ty = element_type(builder.value_type(value));
+                for (index, element) in elements.iter().enumerate() {
+                    let extracted = builder.emit(
+                        InstrKind::Extract {
+                            tensor: value,
+                            index: index as u64,
+                        },
+                        element_ty.clone(),
+                        Some(span),
+                    );
+                    self.lower_pattern_tests(builder, element, extracted, bindings, tests, span);
+                }
+            }
+        }
+    }
+
+    /// Emits the boolean test for one deferred pattern test.
+    fn lower_test(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        test: &MatchTest,
+        span: Span,
+    ) -> ValueId {
+        match test {
+            MatchTest::Literal { value, literal } => {
+                let literal = self.lower_literal(builder, literal);
+                builder.emit(
+                    InstrKind::Binary {
+                        op: BinaryOp::Eq,
+                        lhs: *value,
+                        rhs: literal,
+                    },
+                    IrType::Bool,
+                    Some(span),
+                )
+            }
+            MatchTest::Variant { value, variant } => builder.emit(
+                InstrKind::EnumIs {
+                    value: *value,
+                    variant: variant.clone(),
+                },
+                IrType::Bool,
+                Some(span),
+            ),
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────
 
     fn env_value(&self, name: &str) -> ValueId {
@@ -1262,6 +1589,16 @@ fn collect_assigned_expr(expr: &Expr, out: &mut BTreeSet<String>) {
                 collect_assigned_item(item, out);
             }
         }
+        Expr::Match { expr, arms, .. } => {
+            collect_assigned_expr(expr, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_assigned_expr(guard, out);
+                }
+                collect_assigned_expr(&arm.body, out);
+            }
+        }
+        Expr::Try { operand, .. } => collect_assigned_expr(operand, out),
         Expr::Literal { .. } | Expr::Ident(_) => {}
     }
 }
@@ -1317,29 +1654,64 @@ fn builtin_ret_type(name: &str) -> Option<IrType> {
 }
 
 fn ir_type(ty: &TypeExpr) -> IrType {
-    let elem = match ty.name.name.as_str() {
+    if ty.dims.is_empty() {
+        match ty.name.name.as_str() {
+            "Option" | "Result" => {
+                return IrType::Enum(EnumTy::new(&ty.name.name, Vec::new()));
+            }
+            _ => {}
+        }
+    }
+    match ty.name.name.as_str() {
+        "Option" => {
+            let payload = ty.dims.iter().map(ir_type_from_dim).collect();
+            IrType::Enum(EnumTy::new("Option", payload))
+        }
+        "Result" => {
+            let payload = ty.dims.iter().map(ir_type_from_dim).collect();
+            IrType::Enum(EnumTy::new("Result", payload))
+        }
+        _ if !ty.dims.is_empty() => {
+            let elem = elem_type_for(&ty.name.name);
+            let shape = ty
+                .dims
+                .iter()
+                .map(|dim| match dim {
+                    TypeDim::Const { value, .. } => Dim::Const(*value),
+                    TypeDim::Dynamic(_) => Dim::Dynamic,
+                })
+                .collect();
+            IrType::Tensor(TensorTy::new(elem, shape))
+        }
+        name => ir_type_from_name(name),
+    }
+}
+
+/// Resolves a bare (unshaped) type name to an IR type.
+fn ir_type_from_name(name: &str) -> IrType {
+    match name {
+        "bool" => IrType::Bool,
+        "str" | "string" => IrType::Str,
+        "unit" | "()" => IrType::Unit,
+        _ => IrType::scalar(elem_type_for(name)),
+    }
+}
+
+/// Resolves one generic argument such as the `i64` in `Option[i64]`.
+fn ir_type_from_dim(dim: &TypeDim) -> IrType {
+    match dim {
+        TypeDim::Dynamic(ident) => ir_type_from_name(&ident.name),
+        TypeDim::Const { .. } => IrType::F32,
+    }
+}
+
+/// Maps a numeric type name to its element type; defaults to `f32`.
+fn elem_type_for(name: &str) -> ElemType {
+    match name {
         "i8" | "i16" | "i32" | "i64" | "int" => ElemType::I64,
         "f64" | "double" => ElemType::F64,
-        "f16" | "f32" | "float" => ElemType::F32,
         _ => ElemType::F32,
-    };
-    if ty.dims.is_empty() {
-        return match ty.name.name.as_str() {
-            "bool" => IrType::Bool,
-            "str" | "string" => IrType::Str,
-            "unit" | "()" => IrType::Unit,
-            _ => IrType::scalar(elem),
-        };
     }
-    let shape = ty
-        .dims
-        .iter()
-        .map(|dim| match dim {
-            TypeDim::Const { value, .. } => Dim::Const(*value),
-            TypeDim::Dynamic(_) => Dim::Dynamic,
-        })
-        .collect();
-    IrType::Tensor(TensorTy::new(elem, shape))
 }
 
 fn init_type(expr: &Expr) -> Option<IrType> {
@@ -1452,6 +1824,13 @@ fn unify_elem(a: ElemType, b: ElemType) -> ElemType {
     }
 }
 
+/// Placeholder value returned when a diverging block (`return`/`break`)
+/// terminates before producing a result. Callers on a terminated block
+/// ignore it; the verifier catches any accidental use.
+fn placeholder_value(builder: &FunctionBuilder) -> ValueId {
+    builder.params().first().copied().unwrap_or(ValueId(0))
+}
+
 fn element_type(ty: &IrType) -> IrType {
     match ty {
         IrType::Tensor(tensor) if tensor.rank() <= 1 => IrType::scalar(tensor.elem),
@@ -1508,6 +1887,12 @@ fn common_type(a: &IrType, b: &IrType) -> IrType {
     if a == b {
         return a.clone();
     }
+    if matches!(a, IrType::Unknown) {
+        return b.clone();
+    }
+    if matches!(b, IrType::Unknown) {
+        return a.clone();
+    }
     match (a, b) {
         (IrType::Tensor(lhs), IrType::Tensor(rhs)) => {
             let shape = if lhs.rank() >= rhs.rank() {
@@ -1516,6 +1901,20 @@ fn common_type(a: &IrType, b: &IrType) -> IrType {
                 rhs.shape.clone()
             };
             IrType::Tensor(TensorTy::new(unify_elem(lhs.elem, rhs.elem), shape))
+        }
+        (IrType::Enum(lhs), IrType::Enum(rhs)) if lhs.name == rhs.name => {
+            let len = lhs.payload.len().max(rhs.payload.len());
+            let payload = (0..len)
+                .map(
+                    |index| match (lhs.payload.get(index), rhs.payload.get(index)) {
+                        (Some(a), Some(b)) => common_type(a, b),
+                        (Some(a), None) => a.clone(),
+                        (None, Some(b)) => b.clone(),
+                        (None, None) => IrType::F32,
+                    },
+                )
+                .collect();
+            IrType::Enum(EnumTy::new(&lhs.name, payload))
         }
         _ => {
             if a.is_numeric() {

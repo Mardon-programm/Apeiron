@@ -31,13 +31,15 @@ pub use symbol::{Scope, ScopeKind, Symbol, SymbolKind};
 pub use types::{DomainKind, ElemType, TensorType, Type};
 
 /// Knobs controlling how strict the analyzer is.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct AnalyzerOptions {
     /// Report unresolved identifiers as errors instead of warnings.
     ///
     /// The default is `false` because the domain DSL legitimately
     /// references runtime-provided names such as dataset handles.
     pub unresolved_is_error: bool,
+    /// Native externs (name, signature) the program may call.
+    pub externs: Vec<(String, apeiron_core::ExternSig)>,
 }
 
 /// Incremental semantic analyzer.
@@ -122,6 +124,15 @@ impl Analyzer {
 
     pub(crate) fn lookup(&self, name: &str) -> Option<&Symbol> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
+    }
+
+    /// Looks up a declared native extern by name.
+    pub(crate) fn extern_signature(&self, name: &str) -> Option<&apeiron_core::ExternSig> {
+        self.options
+            .externs
+            .iter()
+            .find(|(extern_name, _)| extern_name == name)
+            .map(|(_, sig)| sig)
     }
 
     // ── diagnostics ─────────────────────────────────────────────────

@@ -23,8 +23,9 @@ const MAX_CALL_DEPTH: usize = 256;
 ///
 /// Native functions are looked up by name when a call does not resolve to a
 /// user-defined [`Function`]; the `apeiron-stdlib` crate supplies the
-/// implementations for Apeiron's standard library.
-pub type NativeFn = fn(&[Value]) -> Result<Value>;
+/// implementations for Apeiron's standard library. Externs loaded through the
+/// `ffi` feature are boxed closures over a native symbol.
+pub type NativeFn = Box<dyn Fn(&[Value]) -> Result<Value>>;
 
 /// Executes a lowered module and records the cognitive state it builds.
 pub struct Evaluator<'a> {
@@ -217,6 +218,40 @@ impl<'a> Evaluator<'a> {
                     return Err(RuntimeError::Type("dimension expects a tensor".into()));
                 };
                 Some(value::dimension(&tensor, *axis)?)
+            }
+            InstrKind::MakeEnum {
+                type_name,
+                variant,
+                payload,
+            } => {
+                let values = frame.resolve_all(payload)?;
+                Some(Value::Enum(value::EnumValue::new(
+                    type_name.clone(),
+                    variant.clone(),
+                    values,
+                )))
+            }
+            InstrKind::EnumIs { value, variant } => {
+                let Value::Enum(enum_value) = frame.get(*value)? else {
+                    return Err(RuntimeError::Type("enum test expects an enum".into()));
+                };
+                Some(Value::Bool(enum_value.is(variant)))
+            }
+            InstrKind::EnumPayload { value, index } => {
+                // Payload extraction is emitted alongside the variant test,
+                // so a non-matching variant still runs it. Yield `unit` in
+                // that case; the analyzed pattern guarantees the payload is
+                // only observed once the variant matched.
+                match frame.get(*value)? {
+                    Value::Enum(enum_value) => Some(
+                        enum_value
+                            .payload
+                            .get(*index as usize)
+                            .cloned()
+                            .unwrap_or(Value::Unit),
+                    ),
+                    _ => Some(Value::Unit),
+                }
             }
             InstrKind::Gradient { target: _, wrt } => Some(seed_derivative(&frame.get(*wrt)?)),
             InstrKind::Belief(inner) => {
@@ -530,6 +565,7 @@ fn default_value(ty: &IrType) -> Value {
         IrType::F32 | IrType::F64 => Value::Float(0.0),
         IrType::Bool => Value::Bool(false),
         IrType::Str => Value::Str(String::new()),
+        IrType::Unknown => Value::Unit,
         IrType::Tensor(tensor) => {
             let shape: Vec<usize> = tensor
                 .shape
@@ -547,6 +583,18 @@ fn default_value(ty: &IrType) -> Value {
             Value::Tensor(Tensor::new(tensor.elem, shape, vec![0.0; len]))
         }
         IrType::Domain(apeiron_ir::DomainKind::CausalNode) => Value::Float(0.0),
+        IrType::Enum(enum_ty) => {
+            let variant = if enum_ty.name == "Result" {
+                "Err"
+            } else {
+                "None"
+            };
+            Value::Enum(value::EnumValue::new(
+                enum_ty.name.clone(),
+                variant,
+                Vec::new(),
+            ))
+        }
         IrType::Domain(_) => Value::Unit,
     }
 }
@@ -574,6 +622,7 @@ fn embedding(value: &Value, dimension: usize) -> Vec<f64> {
         Value::Float(inner) => vec![*inner],
         Value::Str(inner) => hashed_embedding(inner, if dimension == 0 { 8 } else { dimension }),
         Value::Bool(inner) => vec![if *inner { 1.0 } else { 0.0 }],
+        Value::Enum(_) => vec![0.0],
         Value::Unit => vec![0.0],
     }
 }

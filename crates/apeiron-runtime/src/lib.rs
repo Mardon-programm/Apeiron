@@ -26,6 +26,8 @@
 mod causal;
 mod error;
 mod eval;
+#[cfg(feature = "ffi")]
+mod ffi;
 mod memory;
 mod state;
 mod value;
@@ -33,9 +35,11 @@ mod value;
 pub use causal::{CausalModel, Counterfactual};
 pub use error::{Result, RuntimeError};
 pub use eval::{run_module, run_module_with_builtins, Evaluator, NativeFn};
+#[cfg(feature = "ffi")]
+pub use ffi::load_externs;
 pub use memory::{MemoryEntry, MemoryStore, Metric};
 pub use state::{
     ArchitectureState, Belief, Distribution, OptimizerState, Plan, RuntimeState, SocietyState,
     TrainingRun,
 };
-pub use value::{Tensor, Value};
+pub use value::{EnumValue, Tensor, Value};

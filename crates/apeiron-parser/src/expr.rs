@@ -3,7 +3,7 @@
 //! Binding powers are derived from [`BinaryOp::precedence`] so the parser
 //! and the AST pretty printer can never disagree about associativity.
 
-use apeiron_ast::{BinaryOp, Expr, Literal, UnaryOp};
+use apeiron_ast::{Arm, BinaryOp, Expr, Ident, Literal, Pattern, UnaryOp};
 use apeiron_lexer::{Keyword, Token, TokenKind};
 
 use crate::error::ParseError;
@@ -27,6 +27,10 @@ impl Parser {
                 }
                 TokenKind::Dot => {
                     lhs = self.parse_field(lhs)?;
+                    continue;
+                }
+                TokenKind::Question => {
+                    lhs = self.parse_try(lhs)?;
                     continue;
                 }
                 _ => {}
@@ -89,6 +93,7 @@ impl Parser {
                 })
             }
             TokenKind::Keyword(Keyword::If) => self.parse_if(),
+            TokenKind::Keyword(Keyword::Match) => self.parse_match(),
             TokenKind::Ident(_) | TokenKind::Keyword(_) => Ok(Expr::Ident(self.parse_ident()?)),
             TokenKind::Minus => {
                 self.bump();
@@ -190,6 +195,15 @@ impl Parser {
         })
     }
 
+    fn parse_try(&mut self, operand: Expr) -> Result<Expr, ParseError> {
+        let question = self.expect(&TokenKind::Question)?;
+        let span = operand.span().merge(question.span);
+        Ok(Expr::Try {
+            operand: Box::new(operand),
+            span,
+        })
+    }
+
     fn parse_if(&mut self) -> Result<Expr, ParseError> {
         let keyword = self.expect_keyword(Keyword::If)?;
         let condition = self.parse_expr(0)?;
@@ -213,6 +227,130 @@ impl Parser {
             else_branch,
             span,
         })
+    }
+
+    /// Parses `match <expr> { <pattern> [if <guard>] => <body>, ... }`.
+    fn parse_match(&mut self) -> Result<Expr, ParseError> {
+        let keyword = self.expect_keyword(Keyword::Match)?;
+        let scrutinee = self.parse_expr(0)?;
+        self.expect(&TokenKind::LBrace)?;
+        let mut arms = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let arm_start = self.peek().span;
+            let pat = self.parse_pattern()?;
+            let guard = if self.eat_keyword(Keyword::If) {
+                Some(self.parse_expr(0)?)
+            } else {
+                None
+            };
+            self.expect(&TokenKind::FatArrow)?;
+            let body = self.parse_expr(0)?;
+            let span = arm_start.merge(body.span());
+            arms.push(Arm::new(pat, guard, body, span));
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            if self.at(&TokenKind::RBrace) {
+                break;
+            }
+        }
+        let close = self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::Match {
+            expr: Box::new(scrutinee),
+            arms,
+            span: keyword.span.merge(close.span),
+        })
+    }
+
+    /// Parses a single `match` arm pattern.
+    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let token = self.peek().clone();
+        match &token.kind {
+            TokenKind::Integer(value) => {
+                let value = *value;
+                self.bump();
+                Ok(Pattern::Literal(Literal::Int(value)))
+            }
+            TokenKind::Float(value) => {
+                let value = *value;
+                self.bump();
+                Ok(Pattern::Literal(Literal::Float(value)))
+            }
+            TokenKind::Str(value) => {
+                let value = value.clone();
+                self.bump();
+                Ok(Pattern::Literal(Literal::Str(value)))
+            }
+            TokenKind::Keyword(Keyword::True) => {
+                self.bump();
+                Ok(Pattern::Literal(Literal::Bool(true)))
+            }
+            TokenKind::Keyword(Keyword::False) => {
+                self.bump();
+                Ok(Pattern::Literal(Literal::Bool(false)))
+            }
+            TokenKind::Minus => {
+                self.bump();
+                let number = self.peek().clone();
+                match number.kind {
+                    TokenKind::Integer(value) => {
+                        self.bump();
+                        Ok(Pattern::Literal(Literal::Int(-value)))
+                    }
+                    TokenKind::Float(value) => {
+                        self.bump();
+                        Ok(Pattern::Literal(Literal::Float(-value)))
+                    }
+                    _ => Err(self.unexpected("a number")),
+                }
+            }
+            TokenKind::Ident(name) => {
+                let name = name.clone();
+                self.bump();
+                if name == "_" {
+                    Ok(Pattern::Wildcard)
+                } else if name == "None" {
+                    Ok(Pattern::Variant {
+                        name: Ident::new(&name, token.span),
+                        inner: None,
+                    })
+                } else if matches!(name.as_str(), "Some" | "Ok" | "Err")
+                    && self.at(&TokenKind::LParen)
+                {
+                    self.bump();
+                    let inner = self.parse_pattern()?;
+                    self.expect(&TokenKind::RParen)?;
+                    Ok(Pattern::Variant {
+                        name: Ident::new(&name, token.span),
+                        inner: Some(Box::new(inner)),
+                    })
+                } else {
+                    Ok(Pattern::Bind(Ident::new(&name, token.span)))
+                }
+            }
+            TokenKind::LParen => {
+                self.bump();
+                let mut elements = Vec::new();
+                if !self.at(&TokenKind::RParen) {
+                    loop {
+                        elements.push(self.parse_pattern()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                        if self.at(&TokenKind::RParen) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                if elements.len() == 1 {
+                    Ok(elements.pop().expect("single element checked above"))
+                } else {
+                    Ok(Pattern::Tuple(elements))
+                }
+            }
+            _ => Err(self.unexpected("a pattern")),
+        }
     }
 
     /// Parses a `{ ... }` block, returning it as an expression node.

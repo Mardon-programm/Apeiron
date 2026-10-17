@@ -13,10 +13,12 @@
 
 pub mod diagnostic;
 pub mod error;
+pub mod ffi;
 pub mod source;
 pub mod span;
 
 pub use diagnostic::{Diagnostic, DiagnosticBag, Label, Severity};
 pub use error::CoreError;
+pub use ffi::{AbiType, ExternDecl, ExternSig};
 pub use source::{FileId, SourceFile, SourceMap};
 pub use span::{Location, Span};

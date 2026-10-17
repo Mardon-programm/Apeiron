@@ -34,6 +34,6 @@ pub use instr::{
 pub use lower::{lower_program, LowerError};
 pub use passes::{ConstantFolding, DeadCodeElimination, Pass, PassManager};
 pub use print::{print_function, print_module};
-pub use types::{Dim, DomainKind, ElemType, IrType, TensorTy};
+pub use types::{Dim, DomainKind, ElemType, EnumTy, IrType, TensorTy};
 pub use value::{BlockId, FunctionId, Value, ValueDef, ValueId};
 pub use verify::{verify_function, verify_module, VerifyError, VerifyErrorKind};

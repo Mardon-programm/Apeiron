@@ -223,6 +223,73 @@ fn default_pipeline_keeps_module_valid() {
 }
 
 #[test]
+fn option_constructor_lowers_to_make_enum() {
+    let module = lower(
+        r#"
+fn get() -> Option[i64] {
+    if true { Some(3) } else { None }
+}
+"#,
+    );
+    let text = print_module(&module);
+    assert!(text.contains("make_enum Option::Some"), "{text}");
+    assert!(text.contains("make_enum Option::None"), "{text}");
+}
+
+#[test]
+fn result_match_lowers_to_enum_tests() {
+    let module = lower(
+        r#"
+fn unwrap(r: Result[i64, str]) -> i64 {
+    match r {
+        Ok(x) => x,
+        Err(_) => 0
+    }
+}
+"#,
+    );
+    let text = print_module(&module);
+    assert!(text.contains("enum_is"), "{text}");
+    assert!(text.contains("enum_payload"), "{text}");
+}
+
+#[test]
+fn question_mark_lowers_to_conditional_propagation() {
+    let module = lower(
+        r#"
+fn half(x: i64) -> Result[i64, str] {
+    if x < 0 { Err("negative") } else { Ok(x / 2) }
+}
+fn quarter(x: i64) -> Result[i64, str] {
+    let y = half(x)?
+    Ok(y / 2)
+}
+"#,
+    );
+    let text = print_module(&module);
+    assert!(text.contains("enum_is"), "{text}");
+    assert!(text.contains("try.propagate"), "{text}");
+}
+
+#[test]
+fn early_return_terminates_the_branch() {
+    let module = lower(
+        r#"
+fn half(x: i64) -> Result[i64, str] {
+    if x < 0 {
+        return Err("negative")
+    }
+    return Ok(x / 2)
+}
+"#,
+    );
+    let text = print_module(&module);
+    assert!(text.contains("make_enum Result::Err"), "{text}");
+    assert!(text.contains("make_enum Result::Ok"), "{text}");
+    assert!(text.contains("ret"), "{text}");
+}
+
+#[test]
 fn print_round_trips_all_sections() {
     for source in [SECTION_A, SECTION_B, SECTION_C, SECTION_D, SECTION_E] {
         let module = lower(source);

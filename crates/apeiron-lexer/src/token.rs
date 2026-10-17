@@ -72,6 +72,8 @@ pub enum TokenKind {
     FatArrow,
     /// `!`
     Bang,
+    /// `?` — the `try` propagation postfix.
+    Question,
     /// End of input marker always emitted last.
     Eof,
 }
@@ -144,6 +146,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Arrow => f.write_str("->"),
             TokenKind::FatArrow => f.write_str("=>"),
             TokenKind::Bang => f.write_str("!"),
+            TokenKind::Question => f.write_str("?"),
             TokenKind::Eof => f.write_str("end of file"),
         }
     }

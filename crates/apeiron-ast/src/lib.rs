@@ -17,7 +17,7 @@ pub mod print;
 pub mod types;
 
 pub use builtins::{BuiltinRet, BuiltinSig, BUILTINS};
-pub use expr::{BinaryOp, Expr, Literal, UnaryOp};
+pub use expr::{Arm, BinaryOp, Expr, Literal, Pattern, UnaryOp};
 pub use ident::Ident;
 pub use item::{
     ArchOp, ArchitectureBlock, BeliefStmt, Field, FnDecl, Item, LetDecl, MemoryDecl, MemoryTier,

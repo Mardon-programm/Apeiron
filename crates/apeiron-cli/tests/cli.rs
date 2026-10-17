@@ -34,6 +34,7 @@ fn compile_succeeds_and_runs() {
             strict: false,
             run: true,
         },
+        &[],
     );
     assert!(!outcome.has_errors(), "{}", outcome.render_diagnostics());
     assert!(outcome.ir.is_some());
@@ -45,7 +46,7 @@ fn compile_succeeds_and_runs() {
 
 #[test]
 fn syntax_errors_stop_the_pipeline() {
-    let outcome = compile("tensor x = [1.0,", "bad.ape", Options::default());
+    let outcome = compile("tensor x = [1.0,", "bad.ape", Options::default(), &[]);
     assert!(outcome.has_errors());
     assert!(outcome.ir.is_none());
     assert!(outcome.render_diagnostics().contains("PAR0001"));
@@ -54,7 +55,7 @@ fn syntax_errors_stop_the_pipeline() {
 #[test]
 fn strict_mode_promotes_unresolved_to_error() {
     let source = "let y = unknown_identifier\n";
-    let lenient = compile(source, "s.ape", Options::default());
+    let lenient = compile(source, "s.ape", Options::default(), &[]);
     assert!(!lenient.has_errors());
     assert!(lenient.warning_count() >= 1);
 
@@ -65,6 +66,7 @@ fn strict_mode_promotes_unresolved_to_error() {
             strict: true,
             run: false,
         },
+        &[],
     );
     assert!(strict.has_errors());
 }
@@ -78,6 +80,7 @@ fn state_summary_reports_sections() {
             strict: false,
             run: true,
         },
+        &[],
     );
     let summary = outcome.state_summary();
     assert!(summary.contains("beliefs"));
@@ -212,6 +215,36 @@ fn binary_build_links_and_runs_a_project() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("built demo"));
     assert!(stdout.contains("causal"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn binary_build_calls_a_native_extern() {
+    let dir = std::env::temp_dir().join(format!("apeiron-cli-ffi-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create project dir");
+    fs::write(
+        dir.join("Apeiron.toml"),
+        "name = \"ffidemo\"\nentry = \"main.ape\"\n\n[native.cosine]\nlibrary = \"libm.so.6\"\nsymbol = \"cos\"\nsignature = \"f64(f64)\"\n",
+    )
+    .expect("write manifest");
+    fs::write(
+        dir.join("main.ape"),
+        "belief Answer {\n    proposition: \"x\",\n    confidence: cosine(0.0)\n}\n",
+    )
+    .expect("write source");
+
+    let output = apeiron().arg("build").arg(&dir).output().expect("run");
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("built ffidemo"));
+    assert!(stdout.contains("Answer (p=1.000)"), "stdout: {stdout}");
 }
 
 #[test]

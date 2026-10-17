@@ -30,10 +30,13 @@ mod ops;
 
 use std::collections::HashMap;
 
-use apeiron_runtime::NativeFn;
+use apeiron_runtime::{NativeFn, Result, Value};
+
+/// The plain function-pointer form of a built-in implementation.
+type Impl = fn(&[Value]) -> Result<Value>;
 
 /// Native implementations together with the arity each one enforces.
-const REGISTRY: &[(&str, usize, NativeFn)] = &[
+const REGISTRY: &[(&str, usize, Impl)] = &[
     ("abs", 1, ops::abs),
     ("argmax", 1, ops::argmax),
     ("cosine_similarity", 2, ops::cosine_similarity),
@@ -60,7 +63,7 @@ const REGISTRY: &[(&str, usize, NativeFn)] = &[
 pub fn registry() -> HashMap<String, NativeFn> {
     REGISTRY
         .iter()
-        .map(|(name, _, function)| ((*name).to_string(), *function))
+        .map(|(name, _, function)| ((*name).to_string(), Box::new(*function) as NativeFn))
         .collect()
 }
 
@@ -69,7 +72,7 @@ pub fn lookup(name: &str) -> Option<NativeFn> {
     REGISTRY
         .iter()
         .find(|(entry, _, _)| *entry == name)
-        .map(|(_, _, function)| *function)
+        .map(|(_, _, function)| Box::new(*function) as NativeFn)
 }
 
 /// The number of arguments a built-in demands, if one exists.

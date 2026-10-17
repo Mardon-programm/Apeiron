@@ -203,7 +203,7 @@ pub fn verify_function(function: &Function, errors: &mut Vec<VerifyError>) {
             Terminator::Ret(value) => match value {
                 Some(value) => {
                     if let Some(found) = value_type(function, *value) {
-                        if found != &function.return_type {
+                        if !matches_declared(found, &function.return_type) {
                             errors.push(err(
                                 function,
                                 VerifyErrorKind::ReturnTypeMismatch {
@@ -234,6 +234,25 @@ fn err(function: &Function, kind: VerifyErrorKind) -> VerifyError {
     VerifyError {
         function: function.name.clone(),
         kind,
+    }
+}
+
+/// Whether a produced `found` type satisfies a declared `expected` type.
+///
+/// Enum payloads may contain [`IrType::Unknown`] placeholders (the
+/// unconstrained half of `Ok(x)`/`Err(x)`); those match anything.
+fn matches_declared(found: &IrType, expected: &IrType) -> bool {
+    if found == expected {
+        return true;
+    }
+    match (found, expected) {
+        (IrType::Enum(a), IrType::Enum(b)) if a.name == b.name => {
+            a.payload.len() == b.payload.len()
+                && a.payload.iter().zip(&b.payload).all(|(x, y)| {
+                    x == y || matches!(x, IrType::Unknown) || matches!(y, IrType::Unknown)
+                })
+        }
+        _ => false,
     }
 }
 

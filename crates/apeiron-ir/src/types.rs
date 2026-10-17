@@ -168,6 +168,47 @@ impl fmt::Display for DomainKind {
     }
 }
 
+/// An `Option`/`Result` enum type.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct EnumTy {
+    /// Enum type name (`Option` or `Result`).
+    pub name: String,
+    /// Payload types, in variant argument order (`Option` has one,
+    /// `Result` has two: success then error).
+    pub payload: Vec<IrType>,
+}
+
+impl EnumTy {
+    /// Builds an enum type with its payload types.
+    pub fn new(name: impl Into<String>, payload: Vec<IrType>) -> Self {
+        Self {
+            name: name.into(),
+            payload,
+        }
+    }
+
+    /// The payload type at `index`, if declared.
+    pub fn payload_at(&self, index: usize) -> Option<&IrType> {
+        self.payload.get(index)
+    }
+}
+
+impl fmt::Display for EnumTy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.payload.is_empty() {
+            return f.write_str(&self.name);
+        }
+        write!(f, "{}[", self.name)?;
+        for (index, ty) in self.payload.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{ty}")?;
+        }
+        f.write_str("]")
+    }
+}
+
 /// A fully described IR type.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum IrType {
@@ -183,8 +224,13 @@ pub enum IrType {
     Bool,
     /// `str`
     Str,
+    /// Not yet resolved: an enum payload slot whose type the surrounding
+    /// expression does not pin down (e.g. the error half of `Err(x)`).
+    Unknown,
     /// Ranked tensor.
     Tensor(TensorTy),
+    /// `Option`/`Result` enum.
+    Enum(EnumTy),
     /// Opaque cognitive entity.
     Domain(DomainKind),
 }
@@ -219,7 +265,9 @@ impl fmt::Display for IrType {
             IrType::F64 => f.write_str("f64"),
             IrType::Bool => f.write_str("bool"),
             IrType::Str => f.write_str("str"),
+            IrType::Unknown => f.write_str("?"),
             IrType::Tensor(tensor) => write!(f, "{tensor}"),
+            IrType::Enum(enum_ty) => write!(f, "{enum_ty}"),
             IrType::Domain(kind) => write!(f, "{kind}"),
         }
     }

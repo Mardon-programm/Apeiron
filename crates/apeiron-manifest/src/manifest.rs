@@ -14,10 +14,17 @@
 //!
 //! [dependencies]
 //! common = "../common"
+//!
+//! [native.cosine]
+//! library = "libm.so.6"
+//! symbol = "cos"
+//! signature = "f64(f64)"
 //! ```
 
 use std::collections::BTreeMap;
 use std::path::Path;
+
+use apeiron_core::{ExternDecl, ExternSig};
 
 use crate::error::{Error, Result};
 
@@ -34,6 +41,8 @@ pub struct Manifest {
     pub modules: BTreeMap<String, String>,
     /// Path dependencies declared under `[dependencies]`, keyed by name.
     pub dependencies: BTreeMap<String, String>,
+    /// Native externs declared under `[native.<name>]`, keyed by name.
+    pub externs: BTreeMap<String, ExternDecl>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -41,6 +50,15 @@ enum Section {
     Root,
     Modules,
     Dependencies,
+    Native,
+}
+
+/// A partially-filled `[native.<name>]` block.
+#[derive(Default)]
+struct NativeBuilder {
+    library: Option<(String, usize)>,
+    symbol: Option<(String, usize)>,
+    signature: Option<(String, usize)>,
 }
 
 /// Parses a manifest held in `source`, attributing errors to `path`.
@@ -50,7 +68,9 @@ pub fn parse_manifest(path: &Path, source: &str) -> Result<Manifest> {
     let mut entry = None;
     let mut modules = BTreeMap::new();
     let mut dependencies = BTreeMap::new();
+    let mut natives: BTreeMap<String, NativeBuilder> = BTreeMap::new();
     let mut section = Section::Root;
+    let mut native_name = String::new();
 
     for (index, raw) in source.lines().enumerate() {
         let line_number = index + 1;
@@ -64,10 +84,38 @@ pub fn parse_manifest(path: &Path, source: &str) -> Result<Manifest> {
             .strip_prefix('[')
             .and_then(|rest| rest.strip_suffix(']'))
         {
-            section = match header.trim() {
+            let header = header.trim();
+            if let Some(name) = header.strip_prefix("native.") {
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(syntax(
+                        path,
+                        line_number,
+                        "expected `[native.<name>]`".to_string(),
+                    ));
+                }
+                if natives.contains_key(name) {
+                    return Err(Error::Duplicate {
+                        path: path.to_path_buf(),
+                        key: format!("native.{name}"),
+                    });
+                }
+                natives.insert(name.to_string(), NativeBuilder::default());
+                section = Section::Native;
+                native_name = name.to_string();
+                continue;
+            }
+            section = match header {
                 "" => Section::Root,
                 "modules" => Section::Modules,
                 "dependencies" => Section::Dependencies,
+                "native" => {
+                    return Err(syntax(
+                        path,
+                        line_number,
+                        "expected `[native.<name>]`".to_string(),
+                    ))
+                }
                 other => {
                     return Err(syntax(
                         path,
@@ -102,6 +150,26 @@ pub fn parse_manifest(path: &Path, source: &str) -> Result<Manifest> {
             },
             Section::Modules => insert_unique(&mut modules, key, value, path)?,
             Section::Dependencies => insert_unique(&mut dependencies, key, value, path)?,
+            Section::Native => {
+                let builder = natives
+                    .get_mut(&native_name)
+                    .expect("native section always has a builder");
+                let full_key = format!("native.{native_name}.{key}");
+                match key {
+                    "library" => {
+                        set_once_line(&mut builder.library, value, line_number, &full_key, path)?
+                    }
+                    "symbol" => {
+                        set_once_line(&mut builder.symbol, value, line_number, &full_key, path)?
+                    }
+                    "signature" => {
+                        set_once_line(&mut builder.signature, value, line_number, &full_key, path)?
+                    }
+                    other => {
+                        return Err(syntax(path, line_number, format!("unknown key `{other}`")))
+                    }
+                }
+            }
         }
     }
 
@@ -110,13 +178,53 @@ pub fn parse_manifest(path: &Path, source: &str) -> Result<Manifest> {
         field: "name",
     })?;
 
+    let externs = finalize_natives(path, natives)?;
+
     Ok(Manifest {
         name,
         version: version.unwrap_or_else(|| "0.1.0".to_string()),
         entry: entry.unwrap_or_else(|| "main.ape".to_string()),
         modules,
         dependencies,
+        externs,
     })
+}
+
+/// Turns the accumulated `[native.<name>]` blocks into extern declarations.
+fn finalize_natives(
+    path: &Path,
+    natives: BTreeMap<String, NativeBuilder>,
+) -> Result<BTreeMap<String, ExternDecl>> {
+    let mut externs = BTreeMap::new();
+    for (name, builder) in natives {
+        let Some((library, _)) = builder.library else {
+            return Err(Error::MissingExternField {
+                path: path.to_path_buf(),
+                name: name.clone(),
+                field: "library",
+            });
+        };
+        let Some((signature, signature_line)) = builder.signature else {
+            return Err(Error::MissingExternField {
+                path: path.to_path_buf(),
+                name: name.clone(),
+                field: "signature",
+            });
+        };
+        let sig = ExternSig::parse(&signature)
+            .map_err(|message| syntax(path, signature_line, format!("native.{name}: {message}")))?;
+        let symbol = builder.symbol.map(|(value, _)| value).unwrap_or_default();
+        externs.insert(
+            name.clone(),
+            ExternDecl {
+                name,
+                library,
+                symbol,
+                sig,
+            },
+        );
+    }
+    Ok(externs)
 }
 
 fn syntax(path: &Path, line: usize, message: String) -> Error {
@@ -135,6 +243,24 @@ fn set_once(slot: &mut Option<String>, value: String, path: &Path, key: &str) ->
         });
     }
     *slot = Some(value);
+    Ok(())
+}
+
+/// Sets a `(value, line)` slot once, reporting a duplicate with the full key.
+fn set_once_line(
+    slot: &mut Option<(String, usize)>,
+    value: String,
+    line: usize,
+    full_key: &str,
+    path: &Path,
+) -> Result<()> {
+    if slot.is_some() {
+        return Err(Error::Duplicate {
+            path: path.to_path_buf(),
+            key: full_key.to_string(),
+        });
+    }
+    *slot = Some((value, line));
     Ok(())
 }
 
@@ -273,6 +399,54 @@ common = "../common"
         assert_eq!(manifest.version, "0.1.0");
         assert_eq!(manifest.entry, "main.ape");
         assert!(manifest.modules.is_empty());
+        assert!(manifest.externs.is_empty());
+    }
+
+    #[test]
+    fn parses_a_native_extern() {
+        let source = r#"
+name = "ffi-demo"
+
+[native.cosine]
+library = "libm.so.6"
+symbol = "cos"
+signature = "f64(f64)"
+"#;
+        let manifest = parse_manifest(&path(), source).unwrap();
+        let cosine = &manifest.externs["cosine"];
+        assert_eq!(cosine.library, "libm.so.6");
+        assert_eq!(cosine.symbol(), "cos");
+        assert_eq!(cosine.sig.params.len(), 1);
+    }
+
+    #[test]
+    fn native_symbol_defaults_to_the_extern_name() {
+        let source = r#"
+name = "ffi-demo"
+
+[native.sqrt2]
+library = "libm.so.6"
+signature = "f64(f64)"
+"#;
+        let manifest = parse_manifest(&path(), source).unwrap();
+        assert_eq!(manifest.externs["sqrt2"].symbol(), "sqrt2");
+    }
+
+    #[test]
+    fn native_missing_library_is_reported() {
+        let error = parse_manifest(&path(), "name = \"x\"\n[native.a]\nsignature = \"f64()\"\n")
+            .unwrap_err();
+        assert!(error.to_string().contains("library"));
+    }
+
+    #[test]
+    fn native_bad_signature_is_reported() {
+        let error = parse_manifest(
+            &path(),
+            "name = \"x\"\n[native.a]\nlibrary = \"l\"\nsignature = \"void()\"\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown return type"));
     }
 
     #[test]

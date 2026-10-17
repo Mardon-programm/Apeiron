@@ -38,6 +38,16 @@ pub enum Error {
         /// The missing field name.
         field: &'static str,
     },
+    /// A `[native.<name>]` block lacked a required field.
+    #[error("`{path}`: extern `{name}` is missing required field `{field}`")]
+    MissingExternField {
+        /// The manifest path.
+        path: PathBuf,
+        /// The extern name.
+        name: String,
+        /// The missing field name.
+        field: &'static str,
+    },
     /// A key was declared twice.
     #[error("`{path}`: duplicate entry `{key}`")]
     Duplicate {

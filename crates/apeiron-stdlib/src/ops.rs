@@ -60,6 +60,18 @@ fn map(tensor: &Tensor, f: impl Fn(f64) -> f64) -> Value {
     ))
 }
 
+/// Applies `f` element-wise, widening the result to `f64`.
+///
+/// Used by transcendental functions whose outputs are generally fractional,
+/// so an integer-tagged input does not silently truncate on later indexing.
+fn map_float(tensor: &Tensor, f: impl Fn(f64) -> f64) -> Value {
+    Value::Tensor(Tensor::new(
+        ElemType::F64,
+        tensor.shape.clone(),
+        tensor.data.iter().map(|value| f(*value)).collect(),
+    ))
+}
+
 /// Length guard for constructors built from a runtime count.
 fn checked_length(count: i64, name: &str) -> Result<usize> {
     if count < 0 {
@@ -136,19 +148,19 @@ pub(crate) fn relu(args: &[Value]) -> Result<Value> {
 pub(crate) fn sigmoid(args: &[Value]) -> Result<Value> {
     expect(args, 1, "sigmoid")?;
     let tensor = arg_tensor(args, 0, "sigmoid")?;
-    Ok(map(tensor, |value| 1.0 / (1.0 + (-value).exp())))
+    Ok(map_float(tensor, |value| 1.0 / (1.0 + (-value).exp())))
 }
 
 pub(crate) fn tanh(args: &[Value]) -> Result<Value> {
     expect(args, 1, "tanh")?;
     let tensor = arg_tensor(args, 0, "tanh")?;
-    Ok(map(tensor, f64::tanh))
+    Ok(map_float(tensor, f64::tanh))
 }
 
 pub(crate) fn exp(args: &[Value]) -> Result<Value> {
     expect(args, 1, "exp")?;
     let tensor = arg_tensor(args, 0, "exp")?;
-    Ok(map(tensor, f64::exp))
+    Ok(map_float(tensor, f64::exp))
 }
 
 pub(crate) fn log(args: &[Value]) -> Result<Value> {
@@ -159,7 +171,7 @@ pub(crate) fn log(args: &[Value]) -> Result<Value> {
             "log is undefined for the negative value {value}"
         )));
     }
-    Ok(map(tensor, f64::ln))
+    Ok(map_float(tensor, f64::ln))
 }
 
 pub(crate) fn sqrt(args: &[Value]) -> Result<Value> {
@@ -170,7 +182,7 @@ pub(crate) fn sqrt(args: &[Value]) -> Result<Value> {
             "sqrt is undefined for the negative value {value}"
         )));
     }
-    Ok(map(tensor, f64::sqrt))
+    Ok(map_float(tensor, f64::sqrt))
 }
 
 pub(crate) fn abs(args: &[Value]) -> Result<Value> {
@@ -205,7 +217,7 @@ pub(crate) fn softmax(args: &[Value]) -> Result<Value> {
         ));
     }
     Ok(Value::Tensor(Tensor::new(
-        tensor.elem,
+        ElemType::F64,
         tensor.shape.clone(),
         shifted.iter().map(|value| value / total).collect(),
     )))
@@ -379,6 +391,17 @@ mod tests {
         assert!(log(&[vector(&[-1.0])]).is_err());
         assert!(sqrt(&[vector(&[-1.0])]).is_err());
         assert!(log(&[vector(&[0.0])]).is_ok());
+    }
+
+    #[test]
+    fn transcendental_ops_widen_integer_inputs_to_float() {
+        let integers = Value::Tensor(Tensor::new(ElemType::I64, vec![2], vec![1.0, 4.0]));
+        let rooted = tensor_of(&[sqrt(std::slice::from_ref(&integers)).unwrap()], 0);
+        assert_eq!(rooted.elem, ElemType::F64);
+        assert_eq!(rooted.data, vec![1.0, 2.0]);
+
+        let squashed = tensor_of(&[sigmoid(std::slice::from_ref(&integers)).unwrap()], 0);
+        assert_eq!(squashed.elem, ElemType::F64);
     }
 
     #[test]

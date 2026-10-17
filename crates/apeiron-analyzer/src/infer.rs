@@ -1,8 +1,9 @@
 //! Expression type inference and tensor shape inference.
 
 use apeiron_ast::builtins::BuiltinRet;
-use apeiron_ast::{BinaryOp, Expr, Literal, TypeDim, TypeExpr, UnaryOp};
+use apeiron_ast::{BinaryOp, Expr, Ident, Literal, Pattern, TypeDim, TypeExpr, UnaryOp};
 use apeiron_core::span::Span;
+use apeiron_core::AbiType;
 
 use crate::symbol::SymbolKind;
 use crate::types::{ElemType, TensorType, Type};
@@ -23,8 +24,12 @@ impl Analyzer {
                     Some((SymbolKind::CausalNode, _)) => Type::F32,
                     Some((_, ty)) => ty,
                     None => {
-                        self.unresolved(&ident.name, ident.span);
-                        Type::Error
+                        if ident.name == "None" {
+                            Type::Option(Box::new(Type::Unknown))
+                        } else {
+                            self.unresolved(&ident.name, ident.span);
+                            Type::Error
+                        }
                     }
                 }
             }
@@ -57,6 +62,8 @@ impl Analyzer {
                 span,
             } => self.infer_if(condition, then_branch, else_branch.as_deref(), *span),
             Expr::Block { items, .. } => self.infer_block(items),
+            Expr::Match { expr, arms, span } => self.infer_match(expr, arms, *span),
+            Expr::Try { operand, span } => self.infer_try(operand, *span),
         }
     }
 
@@ -208,7 +215,7 @@ impl Analyzer {
                 if lhs.is_sentinel() || rhs.is_sentinel() {
                     return Type::Bool;
                 }
-                if !self.comparable(lhs, rhs) {
+                if !self.comparable(op, lhs, rhs) {
                     self.error("AN0003", format!("cannot compare {lhs} with {rhs}"), span);
                 }
                 Type::Bool
@@ -220,9 +227,12 @@ impl Analyzer {
         }
     }
 
-    fn comparable(&self, lhs: &Type, rhs: &Type) -> bool {
+    fn comparable(&self, op: BinaryOp, lhs: &Type, rhs: &Type) -> bool {
         match (lhs, rhs) {
             (Type::Tensor(a), Type::Tensor(b)) => TensorType::broadcast(a, b).is_some(),
+            (Type::Str, Type::Str) | (Type::Bool, Type::Bool) => {
+                matches!(op, BinaryOp::Eq | BinaryOp::Ne)
+            }
             _ => lhs.numeric_elem().is_some() && rhs.numeric_elem().is_some(),
         }
     }
@@ -407,6 +417,10 @@ impl Analyzer {
                 Type::Error
             }
             None => {
+                if let Some(result) = self.infer_variant_constructor(&ident.name, &arg_types, span)
+                {
+                    return result;
+                }
                 if let Some(signature) = apeiron_ast::builtins::find(&ident.name) {
                     if signature.params.len() != args.len() {
                         self.error(
@@ -439,10 +453,81 @@ impl Analyzer {
                     }
                     return builtin_type(signature.ret);
                 }
+                if let Some(sig) = self.extern_signature(&ident.name).cloned() {
+                    return self.infer_extern_call(&ident.name, &sig, &arg_types, args, span);
+                }
                 self.unresolved(&ident.name, ident.span);
                 Type::Error
             }
         }
+    }
+
+    /// Type-checks a call to a declared native extern.
+    fn infer_extern_call(
+        &mut self,
+        name: &str,
+        sig: &apeiron_core::ExternSig,
+        arg_types: &[Type],
+        args: &[Expr],
+        span: Span,
+    ) -> Type {
+        if sig.params.len() != args.len() {
+            self.error(
+                "AN0007",
+                format!(
+                    "extern `{name}` expects {} argument(s), found {}",
+                    sig.params.len(),
+                    args.len()
+                ),
+                span,
+            );
+            return Type::Error;
+        }
+        for (index, (expected, actual)) in sig.params.iter().zip(arg_types).enumerate() {
+            let expected = extern_type(*expected);
+            if !expected.accepts(actual) {
+                self.error(
+                    "AN0003",
+                    format!(
+                        "argument {} of `{name}`: expected {expected}, found {actual}",
+                        index + 1
+                    ),
+                    args[index].span(),
+                );
+            }
+        }
+        extern_type(sig.ret)
+    }
+
+    /// Recognises the `Some`/`Ok`/`Err` enum constructors. Returns `None`
+    /// when `name` is not a constructor, so normal resolution continues.
+    fn infer_variant_constructor(
+        &mut self,
+        name: &str,
+        arg_types: &[Type],
+        span: Span,
+    ) -> Option<Type> {
+        let variant = match name {
+            "Some" | "Ok" | "Err" => name,
+            _ => return None,
+        };
+        if arg_types.len() != 1 {
+            self.error(
+                "AN0007",
+                format!(
+                    "`{variant}` expects one argument, found {}",
+                    arg_types.len()
+                ),
+                span,
+            );
+            return Some(Type::Error);
+        }
+        let payload = arg_types[0].clone();
+        Some(match variant {
+            "Some" => Type::Option(Box::new(payload)),
+            "Ok" => Type::Result(Box::new(payload), Box::new(Type::Unknown)),
+            _ => Type::Result(Box::new(Type::Unknown), Box::new(payload)),
+        })
     }
 
     fn infer_index(&mut self, target: &Expr, index: &Expr, span: Span) -> Type {
@@ -506,6 +591,18 @@ impl Analyzer {
     }
 
     fn unify_branches(&mut self, then_ty: &Type, else_ty: &Type, span: Span) -> Type {
+        self.unify_branches_as(then_ty, else_ty, span, "`if` branches")
+    }
+
+    /// Unifies two branch types, reporting `label` in the diagnostic so
+    /// `if` and `match` can share the same lattice rules.
+    fn unify_branches_as(
+        &mut self,
+        then_ty: &Type,
+        else_ty: &Type,
+        span: Span,
+        label: &str,
+    ) -> Type {
         if then_ty == else_ty {
             return then_ty.clone();
         }
@@ -515,15 +612,12 @@ impl Analyzer {
         if else_ty.is_sentinel() {
             return then_ty.clone();
         }
+        let message = format!("{label} have incompatible types {then_ty} and {else_ty}");
         match (then_ty, else_ty) {
             (Type::Tensor(a), Type::Tensor(b)) => match TensorType::broadcast(a, b) {
                 Some(result) => rank_to_type(result),
                 None => {
-                    self.error(
-                        "AN0003",
-                        format!("`if` branches have incompatible types {then_ty} and {else_ty}"),
-                        span,
-                    );
+                    self.error("AN0003", message, span);
                     Type::Error
                 }
             },
@@ -531,25 +625,308 @@ impl Analyzer {
                 (Some(a), Some(b)) => match a.unify(b) {
                     Some(unified) => Type::scalar(unified),
                     None => {
-                        self.error(
-                            "AN0003",
-                            format!(
-                                "`if` branches have incompatible types {then_ty} and {else_ty}"
-                            ),
-                            span,
-                        );
+                        self.error("AN0003", message, span);
                         Type::Error
                     }
                 },
                 _ => {
-                    self.error(
-                        "AN0003",
-                        format!("`if` branches have incompatible types {then_ty} and {else_ty}"),
-                        span,
-                    );
+                    // Allow enum branches to unify if one has more specific
+                    // payload types (e.g. `Some(x)` gives Option[T], `None`
+                    // gives Option[Unknown]); accept both.
+                    if then_ty.accepts(else_ty) || else_ty.accepts(then_ty) {
+                        return then_ty.clone();
+                    }
+                    self.error("AN0003", message, span);
                     Type::Error
                 }
             },
+        }
+    }
+
+    // ── match ───────────────────────────────────────────────────────
+
+    /// Types a `match` expression: every arm is checked in its own scope
+    /// with the pattern bindings in scope, and arm bodies are unified.
+    fn infer_match(&mut self, scrutinee: &Expr, arms: &[apeiron_ast::Arm], span: Span) -> Type {
+        let scrutinee_ty = self.infer_expr(scrutinee);
+        if arms.is_empty() {
+            self.error("AN0017", "`match` must have at least one arm", span);
+            return Type::Unit;
+        }
+
+        let mut result: Option<Type> = None;
+        let mut covered = false;
+        for arm in arms {
+            if covered {
+                self.error("AN0018", "this `match` arm is unreachable", arm.span);
+            }
+            self.push_scope(crate::symbol::ScopeKind::Block);
+            self.bind_pattern(&arm.pat, &scrutinee_ty, scrutinee.span());
+            if let Some(guard) = &arm.guard {
+                let guard_ty = self.infer_expr(guard);
+                if !guard_ty.is_sentinel() && guard_ty != Type::Bool {
+                    self.error(
+                        "AN0003",
+                        format!("`match` guard must be bool, found {guard_ty}"),
+                        guard.span(),
+                    );
+                }
+            } else if arm.pat.is_irrefutable() {
+                covered = true;
+            }
+            let body_ty = self.infer_expr(&arm.body);
+            self.pop_scope();
+            result = Some(match result {
+                None => body_ty,
+                Some(accumulated) => {
+                    self.unify_branches_as(&accumulated, &body_ty, span, "`match` arms")
+                }
+            });
+        }
+
+        if !covered && !self.match_is_exhaustive(&scrutinee_ty, arms) {
+            self.error_with_help(
+                "AN0017",
+                "non-exhaustive `match`: no arm covers every value",
+                span,
+                "add a final `_ => ...` arm",
+            );
+            return Type::Error;
+        }
+
+        result.unwrap_or(Type::Unit)
+    }
+
+    /// Whether the arms cover every value of `scrutinee_ty`.
+    ///
+    /// `bool`, `Option` and `Result` are the only types with a finite set
+    /// of constructors the analyzer can enumerate.
+    fn match_is_exhaustive(&self, scrutinee_ty: &Type, arms: &[apeiron_ast::Arm]) -> bool {
+        let names: Vec<&str> = arms
+            .iter()
+            .filter(|arm| arm.guard.is_none())
+            .filter_map(|arm| match &arm.pat {
+                Pattern::Variant { name, .. } => Some(name.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        match scrutinee_ty {
+            Type::Bool => {
+                let mut seen_true = false;
+                let mut seen_false = false;
+                for arm in arms {
+                    if arm.guard.is_some() {
+                        continue;
+                    }
+                    match &arm.pat {
+                        Pattern::Literal(Literal::Bool(true)) => seen_true = true,
+                        Pattern::Literal(Literal::Bool(false)) => seen_false = true,
+                        _ => {}
+                    }
+                }
+                seen_true && seen_false
+            }
+            Type::Option(_) => names.contains(&"Some") && names.contains(&"None"),
+            Type::Result(_, _) => names.contains(&"Ok") && names.contains(&"Err"),
+            _ => false,
+        }
+    }
+
+    /// Declares the names bound by `pat` and checks it against `scrutinee`.
+    fn bind_pattern(&mut self, pat: &Pattern, scrutinee: &Type, span: Span) {
+        match pat {
+            Pattern::Wildcard => {}
+            Pattern::Bind(ident) => {
+                self.declare(crate::symbol::Symbol::new(
+                    ident.name.clone(),
+                    crate::symbol::SymbolKind::Variable,
+                    scrutinee.clone(),
+                    ident.span,
+                ));
+            }
+            Pattern::Literal(literal) => {
+                if scrutinee.is_sentinel() {
+                    return;
+                }
+                let pattern_ty = literal_type(literal);
+                if self.unify_pattern_types(&pattern_ty, scrutinee) {
+                    return;
+                }
+                self.error(
+                    "AN0018",
+                    format!("pattern of type {pattern_ty} cannot match {scrutinee}"),
+                    span,
+                );
+            }
+            Pattern::Variant { name, inner } => {
+                self.bind_variant_pattern(name, inner.as_deref(), scrutinee, span);
+            }
+            Pattern::Tuple(elements) => {
+                if scrutinee.is_sentinel() {
+                    return;
+                }
+                let Type::Tensor(tensor) = scrutinee else {
+                    self.error(
+                        "AN0018",
+                        format!("tuple pattern cannot match {scrutinee}"),
+                        span,
+                    );
+                    return;
+                };
+                let (first, rest) = tensor.shape.split_first().expect("tensor shape");
+                match first {
+                    Some(count) if *count as usize != elements.len() => {
+                        self.error(
+                            "AN0018",
+                            format!(
+                                "pattern has {} elements but the value has {count}",
+                                elements.len()
+                            ),
+                            span,
+                        );
+                        return;
+                    }
+                    _ => {}
+                }
+                let element_ty = if rest.is_empty() {
+                    Type::scalar(tensor.elem)
+                } else {
+                    Type::Tensor(TensorType::new(tensor.elem, rest.to_vec()))
+                };
+                for element in elements {
+                    self.bind_pattern(element, &element_ty, span);
+                }
+            }
+        }
+    }
+
+    /// Whether a literal of type `pattern_ty` can match `scrutinee`.
+    fn unify_pattern_types(&self, pattern_ty: &Type, scrutinee: &Type) -> bool {
+        if pattern_ty == scrutinee {
+            return true;
+        }
+        match (pattern_ty.numeric_elem(), scrutinee.numeric_elem()) {
+            (Some(a), Some(b)) => a.unify(b).is_some(),
+            _ => false,
+        }
+    }
+
+    /// Checks an `Option`/`Result` variant pattern and binds its payload.
+    fn bind_variant_pattern(
+        &mut self,
+        name: &Ident,
+        inner: Option<&Pattern>,
+        scrutinee: &Type,
+        span: Span,
+    ) {
+        let variant = name.name.as_str();
+        if scrutinee.is_sentinel() {
+            if let Some(inner) = inner {
+                self.bind_pattern(inner, &Type::Unknown, span);
+            }
+            return;
+        }
+        let payload = match (variant, scrutinee) {
+            ("Some", Type::Option(ok)) => Some((**ok).clone()),
+            ("Ok", Type::Result(ok, _)) => Some((**ok).clone()),
+            ("Err", Type::Result(_, err)) => Some((**err).clone()),
+            ("None", Type::Option(_)) => None,
+            _ => {
+                self.error(
+                    "AN0018",
+                    format!("variant `{}` cannot match {scrutinee}", name.name),
+                    span,
+                );
+                if let Some(inner) = inner {
+                    self.bind_pattern(inner, &Type::Unknown, span);
+                }
+                return;
+            }
+        };
+        match (inner, payload) {
+            (Some(inner), Some(payload)) => self.bind_pattern(inner, &payload, span),
+            (None, None) => {}
+            (Some(_), None) => self.error(
+                "AN0018",
+                format!("variant `{}` carries no payload", name.name),
+                span,
+            ),
+            (None, Some(_)) => self.error(
+                "AN0018",
+                format!("variant `{}` requires a payload pattern", name.name),
+                span,
+            ),
+        }
+    }
+
+    /// Types the postfix `?` operator and checks it against the enclosing
+    /// function's declared return type.
+    fn infer_try(&mut self, operand: &Expr, span: Span) -> Type {
+        let operand_ty = self.infer_expr(operand);
+        let return_ty = self.function_return.clone();
+        match operand_ty {
+            Type::Option(inner) => {
+                self.check_try_return(
+                    &return_ty,
+                    |ty| matches!(ty, Type::Option(_)),
+                    "Option",
+                    span,
+                );
+                *inner
+            }
+            Type::Result(ok, err) => {
+                if let Some(Type::Result(_, expected_err)) = &return_ty {
+                    if !expected_err.accepts(&err) {
+                        self.error(
+                            "AN0003",
+                            format!(
+                                "`?` propagates an error of type {err} but the function returns {expected_err}"
+                            ),
+                            span,
+                        );
+                    }
+                } else {
+                    self.check_try_return(
+                        &return_ty,
+                        |ty| matches!(ty, Type::Result(_, _)),
+                        "Result",
+                        span,
+                    );
+                }
+                *ok
+            }
+            Type::Unknown | Type::Error => operand_ty,
+            other => {
+                self.error(
+                    "AN0003",
+                    format!("`?` requires an Option or Result, found {other}"),
+                    span,
+                );
+                Type::Error
+            }
+        }
+    }
+
+    /// Reports when `?` is used where the function cannot propagate.
+    fn check_try_return(
+        &mut self,
+        return_ty: &Option<Type>,
+        accepts: impl Fn(&Type) -> bool,
+        expected: &str,
+        span: Span,
+    ) {
+        match return_ty {
+            None => self.error(
+                "AN0003",
+                format!("`?` can only be used inside a function returning {expected}"),
+                span,
+            ),
+            Some(ty) if !ty.is_sentinel() && !accepts(ty) => self.error(
+                "AN0003",
+                format!("`?` on {expected} requires the function to return {expected}, found {ty}"),
+                span,
+            ),
+            Some(_) => {}
         }
     }
 
@@ -558,6 +935,39 @@ impl Analyzer {
     /// Resolves a written type annotation.
     pub(crate) fn type_from_typeexpr(&mut self, ty: &TypeExpr) -> Type {
         let name = ty.name.name.as_str();
+        match name {
+            "Option" => {
+                if ty.dims.len() != 1 {
+                    self.error(
+                        "AN0006",
+                        format!(
+                            "`Option` expects one type argument, found {}",
+                            ty.dims.len()
+                        ),
+                        ty.span,
+                    );
+                    return Type::Error;
+                }
+                return Type::Option(Box::new(self.type_from_dim(&ty.dims[0])));
+            }
+            "Result" => {
+                if ty.dims.len() != 2 {
+                    self.error(
+                        "AN0006",
+                        format!(
+                            "`Result` expects two type arguments, found {}",
+                            ty.dims.len()
+                        ),
+                        ty.span,
+                    );
+                    return Type::Error;
+                }
+                let ok = self.type_from_dim(&ty.dims[0]);
+                let err = self.type_from_dim(&ty.dims[1]);
+                return Type::Result(Box::new(ok), Box::new(err));
+            }
+            _ => {}
+        }
         if !ty.dims.is_empty() {
             let Some(elem) = numeric_elem_for(name) else {
                 self.error(
@@ -569,6 +979,11 @@ impl Analyzer {
             };
             return Type::Tensor(TensorType::new(elem, dims_to_shape(&ty.dims)));
         }
+        self.type_from_name(name, ty.name.span)
+    }
+
+    /// Resolves a bare (unshaped) type name to an analyzer type.
+    fn type_from_name(&mut self, name: &str, span: Span) -> Type {
         if let Some(elem) = numeric_elem_for(name) {
             return Type::scalar(elem);
         }
@@ -577,7 +992,18 @@ impl Analyzer {
             "str" | "string" => Type::Str,
             "unit" | "()" => Type::Unit,
             _ => {
-                self.error("AN0006", format!("unknown type `{name}`"), ty.name.span);
+                self.error("AN0006", format!("unknown type `{name}`"), span);
+                Type::Error
+            }
+        }
+    }
+
+    /// Resolves one generic argument such as the `i64` in `Option[i64]`.
+    fn type_from_dim(&mut self, dim: &TypeDim) -> Type {
+        match dim {
+            TypeDim::Dynamic(ident) => self.type_from_name(&ident.name, ident.span),
+            TypeDim::Const { span, .. } => {
+                self.error("AN0006", "expected a type name", *span);
                 Type::Error
             }
         }
@@ -604,6 +1030,14 @@ fn builtin_type(ret: BuiltinRet) -> Type {
         BuiltinRet::F64 => Type::F64,
         BuiltinRet::Bool => Type::Bool,
         BuiltinRet::Tensor => Type::Unknown,
+    }
+}
+
+/// Maps a native extern's C ABI type onto the analyzer's type lattice.
+fn extern_type(abi: AbiType) -> Type {
+    match abi {
+        AbiType::F64 => Type::F64,
+        AbiType::I64 => Type::I64,
     }
 }
 

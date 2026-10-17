@@ -31,6 +31,8 @@ pub enum Keyword {
     Break,
     /// `continue` — next loop iteration.
     Continue,
+    /// `match` — pattern matching expression.
+    Match,
     /// `true` — boolean literal.
     True,
     /// `false` — boolean literal.
@@ -139,7 +141,7 @@ pub enum Keyword {
 
 impl Keyword {
     /// Canonical identifier spelling of every keyword, in enum order.
-    pub const ALL: [Keyword; 56] = [
+    pub const ALL: [Keyword; 57] = [
         Keyword::Let,
         Keyword::Fn,
         Keyword::Return,
@@ -150,6 +152,7 @@ impl Keyword {
         Keyword::In,
         Keyword::Break,
         Keyword::Continue,
+        Keyword::Match,
         Keyword::True,
         Keyword::False,
         Keyword::Tensor,
@@ -211,6 +214,7 @@ impl Keyword {
             "in" => Keyword::In,
             "break" => Keyword::Break,
             "continue" => Keyword::Continue,
+            "match" => Keyword::Match,
             "true" => Keyword::True,
             "false" => Keyword::False,
             "tensor" => Keyword::Tensor,
@@ -275,6 +279,7 @@ impl Keyword {
             Keyword::In => "in",
             Keyword::Break => "break",
             Keyword::Continue => "continue",
+            Keyword::Match => "match",
             Keyword::True => "true",
             Keyword::False => "false",
             Keyword::Tensor => "tensor",

@@ -12,14 +12,17 @@
 
 pub mod args;
 
+use std::collections::HashMap;
+
 use apeiron_analyzer::{analyze_with, AnalyzerOptions};
 use apeiron_core::diagnostic::{Diagnostic, DiagnosticBag, Severity};
 use apeiron_core::source::SourceMap;
+use apeiron_core::ExternDecl;
 use apeiron_effects::analyze_module;
 use apeiron_ir::{lower_program, print_module, verify_module};
 use apeiron_lexer::Lexer;
 use apeiron_parser::parse_source;
-use apeiron_runtime::{run_module_with_builtins, RuntimeState};
+use apeiron_runtime::{run_module_with_builtins, NativeFn, RuntimeState};
 
 /// Knobs controlling the pipeline.
 #[derive(Clone, Copy, Debug, Default)]
@@ -84,7 +87,11 @@ impl Outcome {
 }
 
 /// Runs the full compiler pipeline (and optionally the runtime).
-pub fn compile(source: &str, name: &str, options: Options) -> Outcome {
+///
+/// `externs` are native symbols the program may call, declared in the project
+/// manifest. Their signatures are visible to the analyzer; when the module is
+/// executed they are loaded and bound alongside the standard library.
+pub fn compile(source: &str, name: &str, options: Options, externs: &[ExternDecl]) -> Outcome {
     let mut map = SourceMap::new();
     let file = map.add(name, source);
     let mut diagnostics = Vec::new();
@@ -104,6 +111,10 @@ pub fn compile(source: &str, name: &str, options: Options) -> Outcome {
 
     let analyzer_options = AnalyzerOptions {
         unresolved_is_error: options.strict,
+        externs: externs
+            .iter()
+            .map(|decl| (decl.name.clone(), decl.sig.clone()))
+            .collect(),
     };
     let analysis = analyze_with(&program, analyzer_options);
     diagnostics.extend(analysis.diagnostics.iter().cloned());
@@ -144,7 +155,21 @@ pub fn compile(source: &str, name: &str, options: Options) -> Outcome {
     let ir = print_module(&module);
 
     let state = if options.run {
-        match run_module_with_builtins(&module, apeiron_stdlib::registry()) {
+        let extern_callables = match load_extern_callables(externs) {
+            Ok(callables) => callables,
+            Err(message) => {
+                diagnostics.push(Diagnostic::error(message).with_code("RUN0001"));
+                return Outcome {
+                    diagnostics,
+                    ir: Some(ir),
+                    state: None,
+                    map,
+                };
+            }
+        };
+        let mut registry = apeiron_stdlib::registry();
+        registry.extend(extern_callables);
+        match run_module_with_builtins(&module, registry) {
             Ok(state) => Some(state),
             Err(error) => {
                 diagnostics.push(Diagnostic::error(error.to_string()).with_code("RUN0001"));
@@ -161,6 +186,18 @@ pub fn compile(source: &str, name: &str, options: Options) -> Outcome {
         state,
         map,
     }
+}
+
+/// Loads declared externs into callables, keyed by extern name.
+///
+/// The CLI enables the runtime's `ffi` feature, so the shared libraries are
+/// opened and each symbol is wrapped in a marshalling closure. A load failure
+/// (missing library or symbol) is surfaced to the caller as a message.
+fn load_extern_callables(externs: &[ExternDecl]) -> Result<HashMap<String, NativeFn>, String> {
+    if externs.is_empty() {
+        return Ok(HashMap::new());
+    }
+    apeiron_runtime::load_externs(externs).map_err(|error| error.to_string())
 }
 
 /// Lexes `source` and returns a textual token dump.
@@ -212,6 +249,7 @@ pub fn effects(source: &str, name: &str, strict: bool) -> Result<String, String>
         &program,
         AnalyzerOptions {
             unresolved_is_error: strict,
+            ..Default::default()
         },
     );
     if analysis.has_errors() {

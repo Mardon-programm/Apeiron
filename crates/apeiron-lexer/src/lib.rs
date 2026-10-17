@@ -370,6 +370,10 @@ impl<'a> Lexer<'a> {
                     TokenKind::Bang
                 }
             }
+            '?' => {
+                self.bump();
+                TokenKind::Question
+            }
             '<' => {
                 self.bump();
                 if self.peek() == Some('=') {
@@ -480,6 +484,19 @@ mod tests {
                 TokenKind::Ident("ShortTermMem".into()),
                 TokenKind::Ident("with_respect_toX".into()),
                 TokenKind::Ident("tensorx".into()),
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn question_mark_is_its_own_token() {
+        assert_eq!(
+            kinds("value? next"),
+            vec![
+                TokenKind::Ident("value".into()),
+                TokenKind::Question,
+                TokenKind::Ident("next".into()),
                 TokenKind::Eof
             ]
         );

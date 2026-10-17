@@ -277,6 +277,29 @@ pub enum InstrKind {
         /// Axis (0-based).
         axis: u32,
     },
+    /// Construct an `Option`/`Result` variant value.
+    MakeEnum {
+        /// Enum type name (`Option` or `Result`).
+        type_name: String,
+        /// Constructor name (`Some`, `None`, `Ok`, `Err`).
+        variant: String,
+        /// Payload values.
+        payload: Vec<ValueId>,
+    },
+    /// Test whether a value is a given variant; yields a `bool`.
+    EnumIs {
+        /// Tested value.
+        value: ValueId,
+        /// Variant name to compare against.
+        variant: String,
+    },
+    /// Extract the `index`-th payload of an enum value.
+    EnumPayload {
+        /// Source enum value.
+        value: ValueId,
+        /// Payload position.
+        index: u64,
+    },
     /// Reverse-mode derivative of `target` with respect to `wrt`.
     Gradient {
         /// Scalar objective.
@@ -375,6 +398,9 @@ impl InstrKind {
             InstrKind::Extract { tensor, .. } | InstrKind::Dimension { tensor, .. } => {
                 out.push(*tensor)
             }
+            InstrKind::MakeEnum { payload, .. } => out.extend(payload.iter().copied()),
+            InstrKind::EnumIs { value, .. } => out.push(*value),
+            InstrKind::EnumPayload { value, .. } => out.push(*value),
             InstrKind::Gradient { target, wrt } => {
                 out.push(*target);
                 out.push(*wrt);

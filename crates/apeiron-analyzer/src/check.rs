@@ -61,7 +61,10 @@ impl Analyzer {
             Item::Tensor(decl) => self.check_tensor(decl),
             Item::Return { value, span } => {
                 self.check_return(value.as_ref(), *span);
-                Type::Unit
+                // A tail `return` makes the enclosing block evaluate to the
+                // function's return type, so `fn f() -> T { return x }`
+                // type-checks just like `fn f() -> T { x }`.
+                self.function_return.clone().unwrap_or(Type::Unit)
             }
             Item::While {
                 condition, body, ..

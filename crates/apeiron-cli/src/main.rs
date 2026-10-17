@@ -54,7 +54,8 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
                 apeiron_manifest::Project::load(&path).map_err(|error| error.to_string())?;
             let source = project.link().map_err(|error| error.to_string())?;
             let name = format!("{} (linked)", project.name());
-            let outcome = compile(&source, &name, Options { strict, run: true });
+            let externs: Vec<_> = project.manifest.externs.values().cloned().collect();
+            let outcome = compile(&source, &name, Options { strict, run: true }, &externs);
             emit_diagnostics(&outcome);
             if outcome.has_errors() {
                 return Ok(ExitCode::FAILURE);
@@ -96,7 +97,7 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         }
         Command::Check { path, strict } => {
             let source = read_file(&path)?;
-            let outcome = compile(&source, &path, Options { strict, run: false });
+            let outcome = compile(&source, &path, Options { strict, run: false }, &[]);
             emit_diagnostics(&outcome);
             if outcome.has_errors() {
                 return Ok(ExitCode::FAILURE);
@@ -110,7 +111,7 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         }
         Command::Ir { path, strict } => {
             let source = read_file(&path)?;
-            let outcome = compile(&source, &path, Options { strict, run: false });
+            let outcome = compile(&source, &path, Options { strict, run: false }, &[]);
             emit_diagnostics(&outcome);
             if outcome.has_errors() {
                 return Ok(ExitCode::FAILURE);
@@ -162,7 +163,7 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         }
         Command::Run { path, strict } => {
             let source = read_file(&path)?;
-            let outcome = compile(&source, &path, Options { strict, run: true });
+            let outcome = compile(&source, &path, Options { strict, run: true }, &[]);
             emit_diagnostics(&outcome);
             if outcome.has_errors() {
                 return Ok(ExitCode::FAILURE);

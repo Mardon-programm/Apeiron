@@ -96,6 +96,24 @@ fn fmt_expr(f: &mut fmt::Formatter<'_>, expr: &Expr, parent: u8) -> fmt::Result 
             }
         }
         Expr::Block { items, .. } => fmt_block(f, items)?,
+        Expr::Try { operand, .. } => {
+            fmt_expr(f, operand, 0)?;
+            f.write_str("?")?;
+        }
+        Expr::Match { expr, arms, .. } => {
+            write!(f, "match {} {{ ", expr)?;
+            for (index, arm) in arms.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(", ")?;
+                }
+                write!(f, "{}", arm.pat)?;
+                if let Some(guard) = &arm.guard {
+                    write!(f, " if {}", guard)?;
+                }
+                write!(f, " => {}", arm.body)?;
+            }
+            f.write_str(" }")?;
+        }
     }
     if wrap {
         f.write_str(")")?;

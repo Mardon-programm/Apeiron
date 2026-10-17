@@ -93,6 +93,13 @@ fn format_kind(kind: &InstrKind) -> String {
         InstrKind::Index { target, index } => format!("index {target}[{index}]"),
         InstrKind::Extract { tensor, index } => format!("extract {tensor}[{index}]"),
         InstrKind::Dimension { tensor, axis } => format!("dim {tensor}, {axis}"),
+        InstrKind::MakeEnum {
+            type_name,
+            variant,
+            payload,
+        } => format!("make_enum {type_name}::{variant}({})", join(payload)),
+        InstrKind::EnumIs { value, variant } => format!("enum_is {value}, {variant}"),
+        InstrKind::EnumPayload { value, index } => format!("enum_payload {value}[{index}]"),
         InstrKind::Gradient { target, wrt } => format!("gradient {target} wrt {wrt}"),
         InstrKind::Belief(inner) => format!("{inner:?}"),
         InstrKind::Distribution { name, categories } => {

@@ -31,6 +31,94 @@ impl fmt::Display for Literal {
     }
 }
 
+/// Pattern used in `match` arms.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+    /// Match any value and bind it to a name.
+    Bind(Ident),
+    /// Match a literal value.
+    Literal(Literal),
+    /// Match and ignore.
+    Wildcard,
+    /// Match a tuple/list of patterns.
+    Tuple(Vec<Pattern>),
+    /// Match an enum variant: `Some(x)`, `None`, `Ok(v)`, `Err(e)`.
+    Variant {
+        /// The variant name.
+        name: Ident,
+        /// The payload pattern, when the variant carries a value.
+        inner: Option<Box<Pattern>>,
+    },
+}
+
+impl Pattern {
+    /// Whether the pattern matches every value of any type without a guard.
+    ///
+    /// Tuple and variant patterns are always refutable: arity and the
+    /// variant tag must still be checked at match time.
+    pub fn is_irrefutable(&self) -> bool {
+        matches!(self, Pattern::Wildcard | Pattern::Bind(_))
+    }
+}
+
+impl fmt::Display for Pattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Pattern::Bind(ident) => ident.fmt(f),
+            Pattern::Literal(lit) => lit.fmt(f),
+            Pattern::Wildcard => f.write_str("_"),
+            Pattern::Tuple(pats) => {
+                f.write_str("(")?;
+                for (index, pat) in pats.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    pat.fmt(f)?;
+                }
+                f.write_str(")")
+            }
+            Pattern::Variant { name, inner } => {
+                write!(f, "{name}")?;
+                if let Some(inner) = inner {
+                    write!(f, "({inner})")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A match arm `pattern [if guard] => body`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Arm {
+    /// The pattern to match against.
+    pub pat: Pattern,
+    /// Optional guard condition.
+    pub guard: Option<Expr>,
+    /// The body expression evaluated on match.
+    pub body: Expr,
+    /// Source range of the arm.
+    pub span: Span,
+}
+
+impl Arm {
+    /// Creates a new arm.
+    pub fn new(pat: Pattern, guard: Option<Expr>, body: Expr, span: Span) -> Self {
+        Self {
+            pat,
+            guard,
+            body,
+            span,
+        }
+    }
+}
+
+impl fmt::Display for Arm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} => {}", self.pat, self.body)
+    }
+}
+
 /// Prefix operators.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum UnaryOp {
@@ -211,6 +299,22 @@ pub enum Expr {
         /// Source range.
         span: Span,
     },
+    /// Pattern match expression: `match x { 1 => "one", _ => "other" }`.
+    Match {
+        /// Scrutinized expression.
+        expr: Box<Expr>,
+        /// Match arms.
+        arms: Vec<Arm>,
+        /// Source range.
+        span: Span,
+    },
+    /// Error propagation: `value?`.
+    Try {
+        /// The `Option`/`Result` expression whose payload is unwrapped.
+        operand: Box<Expr>,
+        /// Source range, covering the operand and the `?`.
+        span: Span,
+    },
     /// Brace-delimited sequence of items evaluated as an expression.
     Block {
         /// Items in source order.
@@ -232,7 +336,9 @@ impl Expr {
             | Expr::Index { span, .. }
             | Expr::Field { span, .. }
             | Expr::If { span, .. }
-            | Expr::Block { span, .. } => *span,
+            | Expr::Block { span, .. }
+            | Expr::Match { span, .. }
+            | Expr::Try { span, .. } => *span,
             Expr::Ident(ident) => ident.span,
         }
     }
@@ -267,6 +373,8 @@ impl Expr {
             Expr::Binary { op, .. } => op.precedence(),
             Expr::Unary { .. } => UnaryOp::Neg.precedence(),
             Expr::Call { .. } | Expr::Index { .. } | Expr::Field { .. } => 8,
+            Expr::Match { .. } => 8,
+            Expr::Try { .. } => 8,
             _ => 9,
         }
     }

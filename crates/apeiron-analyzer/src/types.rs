@@ -186,6 +186,10 @@ pub enum Type {
     Unit,
     /// Ranked tensor value.
     Tensor(TensorType),
+    /// `Option[T]` — either `Some(T)` or `None`.
+    Option(Box<Type>),
+    /// `Result[T, E]` — either `Ok(T)` or `Err(E)`.
+    Result(Box<Type>, Box<Type>),
     /// Function signature.
     Fn {
         /// Parameter types.
@@ -255,6 +259,10 @@ impl Type {
             (Type::Tensor(declared), Type::I64)
             | (Type::Tensor(declared), Type::F32)
             | (Type::Tensor(declared), Type::F64) => declared.rank() == 0,
+            (Type::Option(declared), Type::Option(inferred)) => declared.accepts(inferred),
+            (Type::Result(declared_ok, declared_err), Type::Result(ok, err)) => {
+                declared_ok.accepts(ok) && declared_err.accepts(err)
+            }
             (Type::Domain(a), Type::Domain(b)) => a == b,
             (
                 Type::Fn {
@@ -281,6 +289,8 @@ impl fmt::Display for Type {
             Type::Str => f.write_str("str"),
             Type::Unit => f.write_str("()"),
             Type::Tensor(tensor) => write!(f, "{tensor}"),
+            Type::Option(inner) => write!(f, "Option[{inner}]"),
+            Type::Result(ok, err) => write!(f, "Result[{ok}, {err}]"),
             Type::Fn { params, ret } => {
                 f.write_str("fn(")?;
                 for (idx, param) in params.iter().enumerate() {
